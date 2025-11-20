@@ -18,12 +18,16 @@ const PALAVRAS = [
 ];
 
 // Configuração da sala
-const SALA_ID = 'jogo-impostor-sala';
-const INTERVALO_SYNC = 1000; // 1 segundo
+let SALA_ID = 'jogo-impostor-sala';
+const INTERVALO_SYNC = 500; // 0.5 segundo
 
 // Estado do usuário
 let meuNome = null;
 let ehLider = false;
+let codigoSala = null;
+
+// BroadcastChannel para sincronização entre abas
+let canalBroadcast = null;
 
 // Elementos DOM - Tela Entrada
 const telaEntrada = document.getElementById('tela-entrada');
@@ -74,6 +78,14 @@ function obterDadosSala() {
 
 function salvarDadosSala(dados) {
     localStorage.setItem(SALA_ID, JSON.stringify(dados));
+    
+    // Notificar outras abas via BroadcastChannel
+    if (canalBroadcast) {
+        canalBroadcast.postMessage({
+            tipo: 'atualizar',
+            dados: dados
+        });
+    }
 }
 
 function inicializarSala() {
@@ -84,6 +96,7 @@ function inicializarSala() {
         estado: 'entrada', // entrada, jogando, pontuacao
         palavraAtual: null,
         impostorAtual: null,
+        codigoSala: codigoSala,
         timestamp: Date.now()
     };
     salvarDadosSala(sala);
@@ -96,6 +109,17 @@ function obterOuCriarSala() {
         sala = inicializarSala();
     }
     return sala;
+}
+
+// Gerar código de sala único
+function gerarCodigoSala() {
+    return Math.random().toString(36).substring(2, 8).toUpperCase();
+}
+
+// Obter código da sala da URL
+function obterCodigoSalaDaURL() {
+    const params = new URLSearchParams(window.location.search);
+    return params.get('sala');
 }
 
 // Funções auxiliares
@@ -142,6 +166,18 @@ function entrarNoJogo() {
     if (!sala.lider) {
         sala.lider = nome;
         ehLider = true;
+        
+        // Se for o líder e não tiver código de sala na URL, gerar um novo
+        if (!codigoSala) {
+            codigoSala = gerarCodigoSala();
+            sala.codigoSala = codigoSala;
+            SALA_ID = 'jogo-impostor-sala-' + codigoSala;
+            
+            // Atualizar URL com código da sala
+            const novaURL = window.location.origin + window.location.pathname + '?sala=' + codigoSala;
+            window.history.pushState({}, '', novaURL);
+            linkSala.value = novaURL;
+        }
     }
     
     sala.timestamp = Date.now();
@@ -154,6 +190,7 @@ function entrarNoJogo() {
     } else {
         nomeUsuario.textContent = meuNome;
         trocarTela(telaEntrada, telaEspera);
+        atualizarListaJogadoresEspera();
     }
     
     // Iniciar sincronização
@@ -359,47 +396,72 @@ let intervalSync = null;
 function iniciarSincronizacao() {
     if (intervalSync) return;
     
-    intervalSync = setInterval(() => {
-        const sala = obterDadosSala();
-        if (!sala) return;
+    // Criar BroadcastChannel para sincronização entre abas
+    try {
+        canalBroadcast = new BroadcastChannel('jogo-impostor-' + codigoSala);
         
-        // Atualizar tela baseado no estado
-        if (!ehLider) {
-            // Jogadores seguem o estado da sala
-            if (sala.estado === 'jogando' && telaEspera.classList.contains('ativa')) {
-                // Partida iniciou
-                mostrarPalavraJogador();
-            } else if (sala.estado === 'entrada') {
-                // Atualizar lista de jogadores na espera
-                if (telaEspera.classList.contains('ativa')) {
-                    atualizarListaJogadoresEspera();
-                }
+        canalBroadcast.onmessage = (event) => {
+            if (event.data.tipo === 'atualizar') {
+                // Atualizar interface quando outra aba fizer mudanças
+                processarAtualizacao();
             }
-            
-            // Verificar se há resultado
-            if (sala.resultadoAtual && telaAguardando.classList.contains('ativa')) {
-                resultadoRodada.classList.remove('escondido');
-                if (sala.resultadoAtual === 'verdadeiros') {
-                    textoResultado.textContent = '✅ Jogadores Verdadeiros Venceram!';
-                    textoResultado.style.color = 'var(--cor-sucesso)';
-                } else {
-                    textoResultado.textContent = '🎭 Impostor Venceu!';
-                    textoResultado.style.color = 'var(--cor-perigo)';
-                }
-            }
-            
-            // Voltar para espera se nova rodada
-            if (sala.estado === 'entrada' && telaAguardando.classList.contains('ativa')) {
-                trocarTela(telaAguardando, telaEspera);
+        };
+    } catch (e) {
+        console.log('BroadcastChannel não suportado, usando apenas localStorage events');
+    }
+    
+    // Listener para mudanças no localStorage (funciona entre abas)
+    window.addEventListener('storage', (e) => {
+        if (e.key === SALA_ID && e.newValue) {
+            processarAtualizacao();
+        }
+    });
+    
+    intervalSync = setInterval(() => {
+        processarAtualizacao();
+    }, INTERVALO_SYNC);
+}
+
+function processarAtualizacao() {
+    const sala = obterDadosSala();
+    if (!sala) return;
+    
+    // Atualizar tela baseado no estado
+    if (!ehLider) {
+        // Jogadores seguem o estado da sala
+        if (sala.estado === 'jogando' && telaEspera.classList.contains('ativa')) {
+            // Partida iniciou
+            mostrarPalavraJogador();
+        } else if (sala.estado === 'entrada') {
+            // Atualizar lista de jogadores na espera
+            if (telaEspera.classList.contains('ativa')) {
                 atualizarListaJogadoresEspera();
             }
-        } else {
-            // Líder atualiza lista de jogadores
-            if (telaLider.classList.contains('ativa')) {
-                atualizarListaJogadoresLider();
+        }
+        
+        // Verificar se há resultado
+        if (sala.resultadoAtual && telaAguardando.classList.contains('ativa')) {
+            resultadoRodada.classList.remove('escondido');
+            if (sala.resultadoAtual === 'verdadeiros') {
+                textoResultado.textContent = '✅ Jogadores Verdadeiros Venceram!';
+                textoResultado.style.color = 'var(--cor-sucesso)';
+            } else {
+                textoResultado.textContent = '🎭 Impostor Venceu!';
+                textoResultado.style.color = 'var(--cor-perigo)';
             }
         }
-    }, INTERVALO_SYNC);
+        
+        // Voltar para espera se nova rodada
+        if (sala.estado === 'entrada' && telaAguardando.classList.contains('ativa')) {
+            trocarTela(telaAguardando, telaEspera);
+            atualizarListaJogadoresEspera();
+        }
+    } else {
+        // Líder atualiza lista de jogadores
+        if (telaLider.classList.contains('ativa')) {
+            atualizarListaJogadoresLider();
+        }
+    }
 }
 
 // Copiar link
@@ -437,8 +499,18 @@ btnCopiar.addEventListener('click', copiarLink);
 
 // Inicialização
 document.addEventListener('DOMContentLoaded', () => {
-    // Definir link da sala
-    linkSala.value = window.location.href;
+    // Verificar se há código de sala na URL
+    const codigoDaURL = obterCodigoSalaDaURL();
+    
+    if (codigoDaURL) {
+        // Entrar em uma sala existente
+        codigoSala = codigoDaURL;
+        SALA_ID = 'jogo-impostor-sala-' + codigoSala;
+        linkSala.value = window.location.href;
+    } else {
+        // Criar nova sala (será definido quando o líder entrar)
+        linkSala.value = 'Aguardando criação da sala...';
+    }
     
     // Focar no input
     inputNomeJogador.focus();
